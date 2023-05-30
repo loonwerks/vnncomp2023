@@ -378,7 +378,7 @@ def xywh2xyxy(x):
 
 def parse_opt():
 	parser = argparse.ArgumentParser()
-	parser.add_argument('--seed', type=str, default=10, help='random seed (int)')
+	parser.add_argument('seed', type=str, default=10, help='random seed (int)')
 	parser.add_argument('--test_mode', type=bool, default=False, help='annotate images with predictions (Bool)')
 	opt = parser.parse_args()
 	return opt
