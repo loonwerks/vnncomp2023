@@ -64,7 +64,7 @@ def run(seed, test_mode):
 		bbox = pred[bbox_ind]
 		print('Bounding box index: ' + str(bbox_ind) + ' out of: ' + str(len(pred)))
 		# Apply perturbation and rescale images
-		im_minus, im_plus = add_delta_noise_to_bbox(im, bbox, 80/100)
+		im_minus, im_plus = add_delta_noise_to_bbox(im, bbox, delta)
 		im_minus_scaled = rescale_image(im_minus, img_size)
 		im_plus_scaled = rescale_image(im_plus, img_size)
 		# Serialize property: the probability of existence of the object in bbox does not change by more than eps
