@@ -8,7 +8,7 @@
 #
 # This script is distributed under the AGPL-3.0 license.
 #
-# Run as ' python3 generate_property.py --seed <seed value> [--test_mode True] '
+# Run as ' python3 generate_property.py <seed value> [--test_mode True] '
 
 import csv
 import os
@@ -21,7 +21,16 @@ import numpy
 import onnx
 import onnxruntime
 import shutil
+import ast
 from pathlib import Path
+
+
+# costants
+DELTAS = [0.1/100, 0.5/100, 1/100, 2/100, 5/100, 10/100]
+EPSILON = 10/100
+IMG_SIZE = [640, 640]
+MODEL_NAME = 'yolov5nano_LRelu_640.onnx'
+
 
 def run(seed, test_mode):
 	print('Seed: ' + str(seed))
@@ -34,27 +43,22 @@ def run(seed, test_mode):
 	if os.path.exists(instances_fname):
 		os.remove(instances_fname)
 	os.mkdir(prop_fold_path)
-	model_name = 'yolov5n_SDS_LRelu_v2'
-	model_path = 'onnx/yolov5n_SDS_LRelu_v2.onnx'
-	deltas = [0.1/100, 0.5/100, 1/100, 2/100, 5/100, 10/100]
-	eps = 10/100
-	img_size = [928, 928]
+	model_path = f'onnx/{MODEL_NAME}'
 
 	# Serialize properties, one per delta
-	for delta in deltas:
+	for delta in DELTAS:
 		# Randomly choose and resize image, if necessary with padding
 		im_name = random.choice(os.listdir(im_fold_path))
 		im_path = str(Path(im_fold_path).joinpath(Path(im_name)))
 		print('Image: ' + im_path)
 		im = cv2.imread(im_path)
-		im_scaled = rescale_image(im, img_size)
+		im_scaled = rescale_image(im, IMG_SIZE)
 
 		# Perform prediction
 		print('Model: ' + model_path)
 		check_model(model_path)
 		raw_pred = predict(im_scaled, model_path)
-		# TODO extract class names from onnx_model.metadata_props[1].value?
-		c_names = ['ignored','swimmer','boat','jetski','life_saving_appliances','buoy']
+		c_names = get_model_classes(model_path)
 		pred, out_to_raw_out = non_max_suppression_simple(raw_pred)
 		rescale_bboxes(im_scaled, pred, im)
 	
@@ -65,19 +69,19 @@ def run(seed, test_mode):
 		print('Bounding box index: ' + str(bbox_ind) + ' out of: ' + str(len(pred)))
 		# Apply perturbation and rescale images
 		im_minus, im_plus = add_delta_noise_to_bbox(im, bbox, delta)
-		im_minus_scaled = rescale_image(im_minus, img_size)
-		im_plus_scaled = rescale_image(im_plus, img_size)
-		# Serialize property: the probability of existence of the object in bbox does not change by more than eps
+		im_minus_scaled = rescale_image(im_minus, IMG_SIZE)
+		im_plus_scaled = rescale_image(im_plus, IMG_SIZE)
+		# Serialize property: the probability of existence of the object in bbox does not change by more than EPSILON
 		# prop_fn = str(Path(im_path).stem) + '_'  + str(bbox_ind) + '_' + str(delta) + '.vnnlib'
 		prop_fn = f'img_{Path(im_path).stem}_perturbed_bbox_{bbox_ind}_delta_{delta}.vnnlib'
 		prop_path = str(Path(prop_fold_path).joinpath(Path(prop_fn)))
 		print('Property: ' + prop_path)
 		raw_bbox_ind = out_to_raw_out[bbox_ind]
-		serialize_property(prop_path, model_path, im_minus_scaled, im_plus_scaled, raw_pred, raw_bbox_ind, eps)
+		serialize_property(prop_path, model_path, im_minus_scaled, im_plus_scaled, raw_pred, raw_bbox_ind, EPSILON, IMG_SIZE)
 		
 		with open(instances_fname, 'a', newline='') as f:
 			writer = csv.writer(f)
-			writer.writerow([model_name, prop_fn, '3600'])
+			writer.writerow([MODEL_NAME, prop_fn, '3600'])
 
 	# (optional) Annotate original image and perturbed image copies with related predictions 
 	if test_mode:
@@ -108,8 +112,9 @@ def run(seed, test_mode):
 			os.remove(im_c_path)
 		cv2.imwrite(im_c_path, im_c)
 
-def get_model_interface(model_name):
-	session = onnxruntime.InferenceSession(model_name)
+
+def get_model_interface(model_path):
+	session = onnxruntime.InferenceSession(model_path)
 	input = session.get_inputs()[0]
 	output = session.get_outputs()[0]
 	h = input.shape[2]
@@ -118,8 +123,16 @@ def get_model_interface(model_name):
 	n_data = output.shape[2]
 	return h, w, n_bboxes, n_data
 
-def serialize_property(prop_path, model_name, im_minus, im_plus, raw_pred, raw_bbox_ind, eps):
-	h, w, n_bboxes, n_data = get_model_interface(model_name)
+
+def get_model_classes(model_path):
+	model = onnx.load(model_path)
+	d = ast.literal_eval(model.metadata_props[1].value)
+	classes = [c for c in d.values()]
+	return classes
+
+
+def serialize_property(prop_path, model_path, im_minus, im_plus, raw_pred, raw_bbox_ind, eps, img_size):
+	h, w, n_bboxes, n_data = get_model_interface(model_path)
 	n_channels = 3
 	with open(prop_path, 'a') as f:
 		# Input variables declaration
@@ -153,19 +166,43 @@ def serialize_property(prop_path, model_name, im_minus, im_plus, raw_pred, raw_b
 		n_out = 0
 		f.write('(assert (or ')
 		for b in range(n_bboxes):
-			for d in range(n_data):
-				data = pred[b][d]
-				# NOTE: object existence probability
-				obj_exist_prop_ind = 4
-				if b == raw_bbox_ind and d == obj_exist_prop_ind:
-					ub = min(data*(1+eps), 1.0), 
-					lb = max(data*(1-eps), 0.0)
-				else:
-					ub = data
-					lb = data
-				f.write('(and (>= Y_' + str(n_out) + ' ' + str(ub) + ')) (and (<= Y_' + str(n_out) + ' ' + str(lb) + '))' + '\n')
+			bbox = pred[b]
+			for d in range(n_data): # Constrain upper and lower bounds of each bounding box element
+				data = bbox[d]
+				ub = data
+				lb = data
+				if b == raw_bbox_ind:
+					#if d in [0,2]: # Bounding box does note move more than 1/100 of the image resolution on either axis (x)
+					#	w = img_size[0]
+					#	assert(data >= 0 and data <= w)
+					#	ub = min(data + w/100, w)
+					#	lb = max(data - w/100, 0)
+					#elif d in [1,3]: # (y)
+					#	y = img_size[1]
+					#	assert(data >= 0 and data <= y)
+					#	ub = min(data + y/100, y)
+					#	lb = max(data - y/100, 0)
+					if d == 4: # Object existence probability does not change more than eps
+					    assert(data >= 0 and data <= 1)
+					    ub = min(data*(1+eps), 1.0)
+					    lb = max(data*(1-eps), 0.0)
+					elif d in [5,6,7,8,9,10]:  # Class conditional probability allowed to fluctuate
+						assert(data >= 0 and data <= 1)
+						ub = 1.0
+						lb = 0.0
+				# Negated property
+				constr = '(and (>= Y_' + str(n_out) + ' ' + str(ub) + ')) (and (<= Y_' + str(n_out) + ' ' + str(lb) + '))' + '\n'
+				f.write(constr)
 				n_out += 1
+			if b == raw_bbox_ind: # Highest class conditional probability remains the highest despite of perturbation (negated property)
+				max_class_prob_ind = numpy.argmax(bbox[5:11])
+				n_out_max_class_prob = n_out - 6 + max_class_prob_ind
+				n_out_class_probs = [n for n in range(n_out - 6, n_out) if n != n_out_max_class_prob]
+				for n in n_out_class_probs:
+					constr = '(and (>= Y_' + str(n) + ' Y_' + str(n_out_max_class_prob) + '))' + '\n'
+					f.write(constr)
 		f.write('))')
+
 
 def add_delta_noise_to_bbox(im, bbox, d):
 	im_plus = im.copy()
@@ -179,6 +216,7 @@ def add_delta_noise_to_bbox(im, bbox, d):
 			im_minus[y][x] = color_minus
 	return im_minus, im_plus
 
+
 def draw_bboxes(im, bboxes, color, c_names):
 	for bbox in bboxes:
 		top_left, bottom_right = (int(bbox[0]), int(bbox[1])), (int(bbox[2]), int(bbox[3]))
@@ -186,8 +224,10 @@ def draw_bboxes(im, bboxes, color, c_names):
 		label = f'{c_names[int(bbox[5])]} {bbox[4]:.2f}'
 		cv2.putText(im, text=label, org=top_left, fontFace=0, fontScale=0.5, color = (255,255,255), thickness=1, lineType=cv2.LINE_AA)
 
+
 def rescale_bboxes(im_scaled, pred, im):
 	pred[:, :4] = scale_boxes(im_scaled.shape[2:], pred[:, :4], im.shape).round()
+
 
 def scale_boxes(img1_shape, boxes, img0_shape, ratio_pad=None):
 	# Rescale boxes (xyxy) from img1_shape to img0_shape
@@ -204,6 +244,7 @@ def scale_boxes(img1_shape, boxes, img0_shape, ratio_pad=None):
 	clip_boxes(boxes, img0_shape)
 	return boxes
 
+
 def clip_boxes(boxes, shape):
 	# Clip boxes (xyxy) to image shape (height, width)
 	if isinstance(boxes, torch.Tensor):	 # faster individually
@@ -215,8 +256,9 @@ def clip_boxes(boxes, shape):
 		boxes[..., [0, 2]] = boxes[..., [0, 2]].clip(0, shape[1])  # x1, x2
 		boxes[..., [1, 3]] = boxes[..., [1, 3]].clip(0, shape[0])  # y1, y2
 
-def check_model(model_name):
-	model = onnx.load(model_name)
+
+def check_model(model_path):
+	model = onnx.load(model_path)
 	try:
 		onnx.checker.check_model(model)
 	except onnx.checker.ValidationError as e:
@@ -224,8 +266,9 @@ def check_model(model_name):
 	else:
 		print("The model is valid")
 
-def predict(im_scaled, model_name):
-	session = onnxruntime.InferenceSession(model_name)
+
+def predict(im_scaled, model_path):
+	session = onnxruntime.InferenceSession(model_path)
 	inputs = session.get_inputs()
 	outputs = session.get_outputs()
 	#for i, info in enumerate(inputs):
@@ -242,6 +285,7 @@ def predict(im_scaled, model_name):
 
 	return torch.from_numpy(raw_pred)
 
+
 def rescale_image(im, img_size):
 	im_scaled = letterbox(im, img_size, stride=32, auto=True)[0]  # padded resize
 	im_scaled = im_scaled.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
@@ -252,6 +296,7 @@ def rescale_image(im, img_size):
 	if len(im_scaled.shape) == 3:
 		im_scaled = im_scaled[None]	 # expand for batch dim
 	return im_scaled
+
 
 def letterbox(im, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleFill=False, scaleup=True, stride=32):
 	# Resize and pad image while meeting stride-multiple constraints
@@ -283,6 +328,7 @@ def letterbox(im, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleF
 	im = cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)	 # add border
 	assert(im.shape[0] == new_shape[1] and im.shape[1] == new_shape[0])
 	return im, ratio, (dw, dh)
+
 
 def non_max_suppression_simple(pred):
 	conf_thres=0.25
@@ -367,6 +413,7 @@ def non_max_suppression_simple(pred):
 
 	return output, out_to_raw_out4
 
+
 def xywh2xyxy(x):
 	# Convert nx4 boxes from [x, y, w, h] to [x1, y1, x2, y2] where xy1=top-left, xy2=bottom-right
 	y = x.clone() if isinstance(x, torch.Tensor) else numpy.copy(x)
@@ -376,6 +423,7 @@ def xywh2xyxy(x):
 	y[..., 3] = x[..., 1] + x[..., 3] / 2  # bottom right y
 	return y
 
+
 def parse_opt():
 	parser = argparse.ArgumentParser()
 	parser.add_argument('seed', type=str, default=10, help='random seed (int)')
@@ -383,8 +431,10 @@ def parse_opt():
 	opt = parser.parse_args()
 	return opt
 
+
 def main(opt):
 	run(**vars(opt))
+
 
 if __name__ == "__main__":
 	opt = parse_opt()
