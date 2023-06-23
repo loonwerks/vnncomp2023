@@ -137,7 +137,7 @@ def serialize_property(prop_path, model_path, im_minus, im_plus, raw_pred, raw_b
     with open(prop_path, 'a') as f:
         # Input variables declaration
         n_inp = 0
-        f.write('Input variables:\n')
+        f.write(';Input variables:\n')
         for y in range(h):
             for x in range(w):
                 for k in range(n_channels):
@@ -145,7 +145,7 @@ def serialize_property(prop_path, model_path, im_minus, im_plus, raw_pred, raw_b
                     n_inp += 1
         # Output variables declaration
         n_out = 0
-        f.write('\nOutput variables:\n')
+        f.write('\n;Output variables:\n')
         for b in range(n_bboxes):
             for d in range(n_data):
                 f.write('(declare-const Y_' + str(n_out) + ' Real)' + '\n')
@@ -156,7 +156,7 @@ def serialize_property(prop_path, model_path, im_minus, im_plus, raw_pred, raw_b
         lower = im_minus.numpy()[0]
         lower = lower.transpose((1, 2, 0))
         n_inp = 0
-        f.write('\nInput constraints:\n')
+        f.write('\n;Input constraints:\n')
         for y in range(h):
             for x in range(w):
                 for k in range(n_channels):
@@ -168,7 +168,7 @@ def serialize_property(prop_path, model_path, im_minus, im_plus, raw_pred, raw_b
         # Output constraints definition
         pred = raw_pred.numpy()
         n_out = 0
-        f.write('\nOutput constraints:\n')
+        f.write('\n;Output constraints:\n')
         f.write('(assert (or \n')
         for b in range(n_bboxes):
             bbox = pred[b]
